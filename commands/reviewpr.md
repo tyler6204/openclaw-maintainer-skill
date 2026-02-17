@@ -141,7 +141,7 @@ This is the core parallelism step. All three sub-subagents are READ-ONLY and saf
 
 **Model assignment:**
 - Sub-subagent A (Code Analysis): `model:gpt thinking:xhigh` - needs deep code reasoning
-- Sub-subagent B (CI & Related Scan): `model:gpt-fast` - just API calls and string matching, 2000 TPS
+- Sub-subagent B (CI & Related Scan): `model:gpt` - API calls and string matching
 - Sub-subagent C (Test Coverage & Docs): `model:gpt thinking:xhigh` - needs judgment about test quality
 
 Spawn all three at the same time using `sessions_spawn`. Do NOT wait for one to finish before spawning the next.
@@ -226,7 +226,7 @@ Write your output to .local/review-a.md with these sections:
 
 Spawn with EXACTLY this call:
 ```
-sessions_spawn model:gpt-fast label:"pr-<PR>-ci-scan" runTimeoutSeconds:0 task:"
+sessions_spawn model:gpt label:"pr-<PR>-ci-scan" runTimeoutSeconds:0 task:"
 Check CI status and scan for related issues/PRs for PR #<PR> in the openclaw repo.
 
 Worktree: ~/Development/openclaw/.worktrees/pr-<PR>

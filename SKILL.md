@@ -1,14 +1,13 @@
 ---
 name: openclaw-maintainer
-description: PR review and merge automation for OpenClaw maintainers. Parallelized sub-steps using sub-subagents. Uses gpt (codex) for reasoning tasks and gpt-fast (codex-spark) for lightweight API/search tasks.
+description: PR review and merge automation for OpenClaw maintainers. Parallelized sub-steps using sub-subagents. Uses gpt (codex) for all tasks.
 ---
 
 # OpenClaw Maintainer
 
 PR review + prep + merge automation with parallelized sub-steps.
-Uses two model tiers for cost/speed optimization:
-- **gpt** (openai-codex/gpt-5.3-codex, 60 TPS): code analysis, fixes, anything requiring judgment
-- **gpt-fast** (openai-codex/gpt-5.3-codex-spark, 2000 TPS): GitHub searches, CI checks, post-merge cleanup, API calls + string matching
+Uses one model for consistency:
+- **gpt** (openai-codex/gpt-5.3-codex, 60 TPS): code analysis, fixes, GitHub searches, CI checks, post-merge cleanup, API calls + string matching
 
 ## maxSpawnDepth Requirement
 
@@ -104,16 +103,15 @@ The actual command files live in this skill's `commands/` folder. Subagents read
 
 Review, prep, and merge are long running tasks. NEVER run in the main thread. Always use `sessions_spawn` to create a subagent.
 
-## Model Tiers
+## Model
 
-Two model tiers, used by both top-level subagents and their sub-subagents:
+One model is used by both top-level subagents and their sub-subagents:
 
 | Alias | Model ID | TPS | Use for |
 |-------|----------|-----|---------|
-| `gpt` | openai-codex/gpt-5.3-codex | 60 | Code analysis, fixes, judgment calls |
-| `gpt-fast` | openai-codex/gpt-5.3-codex-spark | 2000 | GitHub searches, CI checks, post-merge cleanup, API calls |
+| `gpt` | openai-codex/gpt-5.3-codex | 60 | Code analysis, fixes, GitHub searches, CI checks, post-merge cleanup, API calls |
 
-Top-level subagents always use `gpt` with `thinking:xhigh`. They spawn sub-subagents with the appropriate tier based on task type. The command files specify which model each sub-subagent should use.
+Top-level subagents always use `gpt` with `thinking:xhigh`. Sub-subagents also use `gpt`. The command files specify which model each sub-subagent should use.
 
 If a model is not available, fall back to session default model.
 
@@ -143,18 +141,18 @@ sessions_spawn task:"Merge PR #<number> in openclaw repo. Read commands/mergepr.
 
 ## Parallelism Design
 
-Each command file documents when and how to spawn sub-subagents, including which model tier to use. All command files include the EXACT `sessions_spawn` call syntax so sub-subagents know precisely what to invoke.
+Each command file documents when and how to spawn sub-subagents, including which model to use. All command files include the EXACT `sessions_spawn` call syntax so sub-subagents know precisely what to invoke.
 
 ### /reviewpr parallelism
 Three parallel read-only sub-subagents after worktree setup:
 - **Subagent A (Code Analysis)** `model:gpt thinking:xhigh`: reads diff, analyzes quality, correctness, edge cases, security
-- **Subagent B (CI & Related Scan)** `model:gpt-fast`: checks CI status, searches for related issues/PRs, scans for duplicates
+- **Subagent B (CI & Related Scan)** `model:gpt`: checks CI status, searches for related issues/PRs, scans for duplicates
 - **Subagent C (Test Coverage)** `model:gpt thinking:xhigh`: checks test coverage gaps, test quality (flags sleep/setTimeout/polling), docs, changelog
 - Then the parent (gpt) combines all results into one structured review
 
 ### /preparepr parallelism
 Parallel read-only scanning phase (2 sub-subagents), then serial fix/gates phases:
-- **Parallel Scan Phase:** lint scanner `model:gpt-fast` and fix identifier `model:gpt thinking:xhigh` run concurrently
+- **Parallel Scan Phase:** lint scanner `model:gpt` and fix identifier `model:gpt thinking:xhigh` run concurrently
 - **Serial Fix Phase:** parent (gpt) applies code fixes following the recommended fix order from the Fix Identifier, rebases, commits, updates changelog and docs
 - **Gates Phase:** run lint (inline), build (background, sleep 40 + poll), test (background, sleep 60 + poll). Tests run here AFTER fixes are applied. Only read output on failure.
 - **Push Phase:** push and verify (parent, gpt)
@@ -164,7 +162,7 @@ Note: tests are intentionally NOT run during the parallel scan phase. Running te
 ### /mergepr parallelism
 Serial merge (parent, gpt) with identity-aware commenting, then single cleanup sub-subagent:
 - **Serial Phase:** verify state, check GitHub identity, merge via gh pr merge --squash, post identity-aware comment
-- **Single Cleanup Sub-subagent** `model:gpt-fast`: close superseded PRs (identity-aware), close related issues (identity-aware), clean worktree and branches. All done serially in one agent since it's ~5 API calls total.
+- **Single Cleanup Sub-subagent** `model:gpt`: close superseded PRs (identity-aware), close related issues (identity-aware), clean worktree and branches. All done serially in one agent since it's ~5 API calls total.
 
 ## Important Notes
 

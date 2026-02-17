@@ -22,8 +22,8 @@ This command uses PARALLELISM and a LATE REBASE strategy:
 
 CRITICAL: Rebase happens ONCE at the end, not at the beginning. This prevents the expensive pattern of: rebase → fix → gates → main moved → rebase again → gates again → main moved again...
 
-**Model tiers for sub-subagents:**
-- Lint scan: `model:gpt-fast` (codex-spark, 2000 TPS) - just running commands and collecting output
+**Model for sub-subagents:**
+- Lint scan: `model:gpt` (codex) - runs commands and collects output
 - Fix identification (what to change and how): `model:gpt thinking:xhigh` (codex) - needs code reasoning
 - All serial phases run in the parent agent which is already `model:gpt thinking:xhigh`
 
@@ -251,7 +251,7 @@ pnpm install --frozen-lockfile
 Now spawn 2 sub-subagents to scan for issues in parallel. Both are READ-ONLY scanners. They inspect the current state and write findings to separate files. The parent agent then reads all findings and applies fixes serially.
 
 **Model assignment:**
-- Lint Scanner: `model:gpt-fast` - just running pnpm lint and collecting output
+- Lint Scanner: `model:gpt` - just running pnpm lint and collecting output
 - Fix Identifier: `model:gpt thinking:xhigh` - needs code reasoning to plan fixes
 
 Spawn both at the same time. Do NOT wait for one before spawning the next.
@@ -260,7 +260,7 @@ Spawn both at the same time. Do NOT wait for one before spawning the next.
 
 Spawn with EXACTLY this call:
 ```
-sessions_spawn model:gpt-fast label:"pr-<PR>-lint-scan" runTimeoutSeconds:0 task:"
+sessions_spawn model:gpt label:"pr-<PR>-lint-scan" runTimeoutSeconds:0 task:"
 Scan for lint and formatting issues in PR #<PR>.
 
 Worktree: ~/Development/openclaw/.worktrees/pr-<PR>
