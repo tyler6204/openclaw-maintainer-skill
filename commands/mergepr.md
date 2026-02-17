@@ -8,13 +8,13 @@ Input
 SAFETY (read before doing anything)
 - The ONLY way code reaches main is `gh pr merge --squash`. No `git push` to main, ever.
 - Do NOT run gateway stop commands. Do NOT kill processes. Do NOT touch port 18792.
-- Do NOT run `git push` at all during merge. The only push-like operation is `gh pr merge`.
+- Do NOT run `git push` to main, ever. If rebase is needed, the only allowed push is `git push --force-with-lease` to the PR head branch.
 
 DO (merge only)
 Goal: PR must end in GitHub state = MERGED (never CLOSED). Assumes /preparepr already ran.
 Use gh pr merge with --squash.
 
-After merge succeeds, this command spawns a SINGLE cleanup sub-subagent that handles all post-merge tasks serially: close superseded PRs, close related issues, and clean up the worktree. Uses `model:gpt-fast` (codex-spark, 2000 TPS) since it's just API calls.
+After merge succeeds, this command spawns a SINGLE cleanup sub-subagent that handles all post-merge tasks serially: close superseded PRs, close related issues, and clean up the worktree. Uses `model:gpt` (codex).
 
 ## GitHub Identity Awareness (IMPORTANT)
 
@@ -219,7 +219,7 @@ if gh pr view <PR> --json isDraft --jq .isDraft | grep -q true; then
   exit 1
 fi
 
-# Rebase onto latest main if behind (this is the ONLY place rebase happens in the pipeline)
+# Rebase onto latest main if behind (first rebase check in the pipeline)
 git fetch origin main
 git fetch origin pull/<PR>/head:pr-<PR> --force
 if ! git merge-base --is-ancestor origin/main pr-<PR>; then
@@ -285,23 +285,115 @@ gh pr checks <PR>
 
 If required checks are failing, stop and say to run /preparepr before merge.
 
-## Step 7: Merge PR (squash and delete branch)
+## Step 7: Merge PR (squash and delete branch, auto-rebase on conflict)
 
 This is the atomic, serial merge step. Do not parallelize.
 
 ```sh
-# Check if any checks are still running
-check_status=$(gh pr checks <PR> 2>&1)
-if echo "$check_status" | grep -q "pending\|queued"; then
-  echo "Checks still running, using --auto to queue merge"
-  gh pr merge <PR> --squash --delete-branch --auto
-  echo "Merge queued. Monitor with: gh pr checks <PR> --watch"
+merge_once() {
+  check_status=$(gh pr checks <PR> 2>&1 || true)
+  if echo "$check_status" | grep -q "pending\|queued"; then
+    echo "Checks still running, using --auto to queue merge"
+    gh pr merge <PR> --squash --delete-branch --auto
+  else
+    gh pr merge <PR> --squash --delete-branch
+  fi
+}
+
+if merge_once; then
+  echo "Merge command succeeded"
 else
-  gh pr merge <PR> --squash --delete-branch
+  echo "Initial merge command failed, checking conflict state"
+  mergeable=$(gh pr view <PR> --json mergeable --jq .mergeable 2>/dev/null || echo "")
+  merge_state=$(gh pr view <PR> --json mergeStateStatus --jq .mergeStateStatus 2>/dev/null || echo "")
+  echo "mergeable=$mergeable"
+  echo "mergeStateStatus=$merge_state"
+
+  if [ "$mergeable" = "CONFLICTING" ] || [ "$merge_state" = "DIRTY" ]; then
+    echo "Conflict detected, rebasing PR branch onto origin/main"
+
+    git fetch origin main
+    git fetch origin pull/<PR>/head:pr-<PR> --force
+    cd ~/Development/openclaw/.worktrees/pr-<PR>
+    git checkout pr-<PR> 2>/dev/null || git checkout -b pr-<PR> pr-<PR>
+
+    if ! git rebase origin/main; then
+      echo "Rebase hit conflicts, attempting automatic conflict resolution"
+      while git diff --name-only --diff-filter=U | grep -q .; do
+        conflicted=$(git diff --name-only --diff-filter=U)
+        echo "Conflicted files:"
+        echo "$conflicted"
+
+        # Prefer PR-side changes while rebasing, then continue
+        echo "$conflicted" | while read -r f; do
+          [ -n "$f" ] || continue
+          git checkout --theirs -- "$f" || true
+          git add "$f" || true
+        done
+
+        GIT_EDITOR=true git rebase --continue || true
+
+        if git diff --name-only --diff-filter=U | grep -q .; then
+          echo "ERROR: rebase conflicts remain after automatic resolution"
+          echo "If conflicts are not resolvable confidently, run git rebase --abort and stop"
+          exit 1
+        fi
+      done
+
+      if [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ]; then
+        echo "ERROR: rebase is still in progress, conflicts were not fully resolvable"
+        echo "Run git rebase --abort and stop"
+        exit 1
+      fi
+    fi
+
+    echo "Rebase succeeded, running full gates"
+    pnpm install --frozen-lockfile
+    pnpm lint || { echo "ERROR: lint failed after conflict rebase"; exit 1; }
+
+    pnpm build > .local/merge-build-output.txt 2>&1 &
+    BUILD_PID=$!
+    sleep 40
+    while kill -0 $BUILD_PID 2>/dev/null; do sleep 10; done
+    wait $BUILD_PID
+    if [ $? -ne 0 ]; then
+      echo "ERROR: build failed after conflict rebase"
+      cat .local/merge-build-output.txt
+      exit 1
+    fi
+
+    unset OPENCLAW_GATEWAY_TOKEN OPENCLAW_GATEWAY_PASSWORD 2>/dev/null || true
+    pnpm test > .local/merge-test-output.txt 2>&1 &
+    TEST_PID=$!
+    sleep 60
+    while kill -0 $TEST_PID 2>/dev/null; do sleep 10; done
+    wait $TEST_PID
+    if [ $? -ne 0 ]; then
+      echo "ERROR: full test suite failed after conflict rebase"
+      cat .local/merge-test-output.txt
+      exit 1
+    fi
+
+    head=$(gh pr view <PR> --json headRefName --jq .headRefName)
+    head_repo=$(gh pr view <PR> --json headRepository --jq .headRepository.nameWithOwner)
+    git push --force-with-lease "https://github.com/$head_repo.git" HEAD:"$head"
+
+    echo "Rebased, gates passed, pushed. Waiting 15s for CI to pick up new commit"
+    sleep 15
+
+    echo "Retrying merge once after successful conflict rebase"
+    if ! merge_once; then
+      echo "ERROR: merge failed again after successful rebase"
+      exit 1
+    fi
+  else
+    echo "ERROR: merge failed for a non-conflict reason"
+    exit 1
+  fi
 fi
 ```
 
-If merge fails, report the error and stop. Do not retry in a loop.
+Do not retry in a loop. One retry is allowed only after a successful conflict rebase.
 
 ## Step 8: Get merge sha and verify state
 
@@ -338,7 +430,7 @@ fi
 
 ## Step 10: SINGLE POST-MERGE CLEANUP SUB-SUBAGENT
 
-Now that the PR is merged, spawn ONE cleanup sub-subagent that handles all post-merge tasks serially. This is ~5 API calls total, so a single agent is faster than spawning 3 separate agents.
+Now that the PR is merged, spawn ONE cleanup sub-subagent that handles all post-merge tasks serially, including an aggressive deep search for related PRs and issues.
 
 **Important:** Save the data from .local/ that the cleanup sub-subagent needs BEFORE spawning it, because it will delete the worktree (and .local/ with it). Pass the data inline in the task description.
 
@@ -353,7 +445,7 @@ echo "$related_content"
 
 Spawn with EXACTLY this call:
 ```
-sessions_spawn model:gpt-fast label:"pr-<PR>-cleanup" runTimeoutSeconds:0 task:"
+sessions_spawn model:gpt label:"pr-<PR>-cleanup" runTimeoutSeconds:0 task:"
 Post-merge cleanup for PR #<PR> in openclaw/openclaw.
 
 Merged PR URL: <pr_url>
@@ -373,44 +465,69 @@ IDENTITY-AWARE COMMENTING RULES:
 
 Do all three tasks below IN ORDER:
 
+GLOBAL RULE, NEVER COMMENT WITHOUT CLOSING:
+- If you comment on a PR or issue, you are also closing it in the same action.
+- Do not leave overlap or superseded heads-up comments without closing.
+- The only exception is broader-scope partial fixes, comment with remaining scope and leave open.
+
 ---
 
-TASK 1: Close superseded/duplicate PRs
+TASK 1: Close superseded/duplicate PRs, aggressive deep cleanup
 
 Related data from reviewpr:
 <paste the 'PRs to close after merge' section here, or 'none'>
 
-For each PR listed:
-1. Verify it is still open: gh pr view <NUM> --json state --jq .state
-2. Check who authored it: gh pr view <NUM> --json author --jq .author.login
-3. If open, close with identity-aware comment:
+Start with the listed PRs, then do a deep search across open PRs:
+1. Build search inputs from:
+   - PR title keywords
+   - PR body keywords
+   - changed file paths from this merged PR
+   - intent-matching phrases, same bug/feature objective even if title wording differs
+2. Commands to gather candidates:
+   - gh search prs --repo openclaw/openclaw --state open --limit 100 --search \"<keyword or phrase>\"
+   - gh api repos/openclaw/openclaw/pulls/<PR>/files --paginate --jq '.[].filename'
+   - use file path chunks and directory names as additional gh search prs queries
+3. For every candidate PR:
+   - verify state is OPEN
+   - inspect title/body/files to confirm it is superseded, duplicate, overlapping, or already resolved by <pr_url>
+   - check author for identity-aware wording
+   - close aggressively when reasonably related and now redundant
+4. Closing comment templates:
    - Self: 'Closing this out, superseded by <pr_url> (merge commit: <merge_sha>).'
-   - Other: 'Superseded by <pr_url> (merge commit: <merge_sha>). Thanks for the contribution! Closing to reduce duplicate PR noise.'
-4. If already closed/merged, skip it
+   - Other: 'Superseded by <pr_url> (merge commit: <merge_sha>). Thanks for the contribution, closing to reduce duplicate PR noise.'
 
-Also do a quick search for obvious duplicates not in the list:
-title='<pr_title>'
-q1=$(echo \"$title\" | sed -E 's/\([^)]*\)//g' | tr -s ' ' | cut -c1-80)
-gh search prs --repo openclaw/openclaw --state open --limit 10 --json number,title --search \"$q1\" || true
-Close any clear duplicates found (with identity-aware comments).
+Target behavior: with a large backlog, prefer aggressive duplicate reduction over conservative leave-open behavior.
 
 ---
 
-TASK 2: Close/link related issues
+TASK 2: Close related issues, aggressive deep cleanup
 
 Related data from reviewpr:
 <paste the 'Issues to close after merge' and 'Body references' sections here, or 'none'>
 
-For each issue listed:
-1. Verify it is still open: gh issue view <NUM> --json state --jq .state
-2. Check who authored it: gh issue view <NUM> --json author --jq .author.login
-3. If open and clearly resolved, close with identity-aware comment:
+Process listed issues first, then do a deep search across open issues:
+1. Build issue search inputs from:
+   - PR title and body keywords
+   - changed file paths and directories
+   - intent-matching wording for the same failure mode or user-facing problem
+2. Commands to gather candidates:
+   - gh search issues --repo openclaw/openclaw --state open --limit 200 --search \"<keyword or phrase>\"
+   - include multiple focused queries, not just one broad query
+3. For every candidate issue:
+   - verify state is OPEN
+   - determine if fully resolved, superseded, duplicate, or low-quality/nonsensical but semi-related to what was fixed
+   - close anything now resolved or no longer useful, include a brief explanation
+   - use identity-aware wording for close comments
+4. Closing comment templates:
    - Self: 'Resolved by <pr_url> (merge commit: <merge_sha>). Closing.'
    - Other: 'Resolved by <pr_url> (merge commit: <merge_sha>). Thanks for the report!'
-4. If broader scope than what this PR fixed, comment but leave open:
+   - Low-quality/nonsensical semi-related: 'Closing as resolved/superseded by <pr_url> (merge commit: <merge_sha>). This report no longer maps to a current actionable issue after the merged fix.'
+5. Only exception, partial fix with broader remaining scope:
    - Self: 'Partially addressed by <pr_url> (merge commit: <merge_sha>). Remaining scope: <describe>.'
    - Other: 'Partially addressed by <pr_url> (merge commit: <merge_sha>). Thanks for the report! Remaining scope: <describe>.'
-5. If already closed, skip it
+   - Leave open only in this exact broader-scope case
+
+Target behavior: close as many related items as reasonably possible.
 
 ---
 
@@ -478,5 +595,5 @@ Rules
 - PR must end in MERGED state
 - Only cleanup after merge success
 - NEVER push to main. `gh pr merge --squash` is the only path to main.
-- Do NOT run `git push` at all in this command.
+- Do NOT run `git push` to main. If conflict rebase is required, only push to the PR head branch with `--force-with-lease`.
 - Always use identity-aware commenting (case-insensitive username comparison before every comment).
