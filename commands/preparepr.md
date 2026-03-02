@@ -351,20 +351,23 @@ rg -l "<feature_keyword>" docs/ README.md 2>/dev/null || true
 
 Changelog checks:
 ```sh
-# Get latest release metadata
-gh release list --limit 1 --exclude-drafts --exclude-pre-releases
+# Get latest release version and date
+latest_release=$(gh release list --limit 1 --exclude-drafts --exclude-pre-releases --json tagName,publishedAt --jq '.[0] | "\(.tagName) (\(.publishedAt[:10]))"')
+echo "Latest release: $latest_release"
 
 # Read changelog if present
 if [ -f CHANGELOG.md ]; then
-  head -50 CHANGELOG.md
+  head -80 CHANGELOG.md
 else
   echo "No CHANGELOG.md found, skip changelog update"
 fi
 ```
 
 Rules:
-- Add user-facing entries under `## Unreleased`.
-- Never place new entries inside already-released sections.
+- NEVER add entries under a version header that already has a GitHub release. Check `gh release list` first.
+- If the latest release is e.g. `2026.3.2`, do NOT add entries under `## 2026.3.2`. That version is already published.
+- Instead, create a new version header approximately 3 days ahead of the latest release (e.g. if latest is `2026.3.2`, use `## 2026.3.5`). Check existing unreleased headers first and use those if present.
+- If an `## Unreleased` header exists, use that.
 - Match existing style.
 - Keep entries concise with PR reference.
 
