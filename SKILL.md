@@ -1,14 +1,14 @@
 ---
 name: openclaw-maintainer
-description: PR review and merge automation for OpenClaw maintainers. Selective parallelism, review uses parallel read-only sub-subagents, prep is serial, merge uses one cleanup sub-subagent. Top-level orchestration uses opus, sub-subagents use gpt (codex) for code execution work.
+description: PR review and merge automation for OpenClaw maintainers. Selective parallelism, review uses parallel read-only sub-subagents (opus orchestrator), prep is serial (gpt), merge uses one cleanup sub-subagent (gpt orchestrator).
 ---
 
 # OpenClaw Maintainer
 
 PR review + prep + merge automation with selective parallelism.
 Uses role-specific models:
-- **opus** (anthropic/claude-opus-4-6): top-level orchestration, judgment, synthesis, instruction following
-- **gpt** (openai-codex/gpt-5.3-codex, 60 TPS): sub-subagent code execution, GitHub searches, CI checks, and cleanup actions
+- **opus** (anthropic/claude-opus-4-6): orchestration requiring parallel sub-subagent fanout (reviewpr only)
+- **gpt** (openai-codex/gpt-5.3-codex, 60 TPS): serial workflows (preparepr, mergepr), sub-subagent code execution, GitHub searches, CI checks, and cleanup actions
 
 ## maxSpawnDepth Requirement
 
@@ -95,11 +95,11 @@ The actual command files live in this skill's `commands/` folder. Subagents read
 3. **Opus subagent:** sets up worktree, spawns 3 parallel sub-subagents (code analysis, CI/related scan, test coverage), combines results into structured review, saves `.local/review.md` and `.local/related.md`, pings back findings.
 4. **Main agent:** summarizes for user (ready for prep, needs work, concerns)
 5. **User:** "ok prep it" / "fix X first" / "don't merge"
-6. **Main agent:** if approved, spawns opus subagent (high thinking) via `sessions_spawn`. Subagent reads `commands/preparepr.md`.
-7. **Opus subagent:** runs /preparepr fully serially in one agent, installs dependencies, scans lint and review concerns, applies fixes, rebases, updates changelog/docs when needed, runs token-optimized gates, pushes, verifies push. Saves `.local/prep.md`.
+6. **Main agent:** if approved, spawns gpt subagent (xhigh thinking) via `sessions_spawn`. Subagent reads `commands/preparepr.md`.
+7. **GPT subagent:** runs /preparepr fully serially in one agent, installs dependencies, scans lint and review concerns, applies fixes, rebases, updates changelog/docs when needed, runs token-optimized gates, pushes, verifies push. Saves `.local/prep.md`.
 8. **User:** "merge it"
-9. **Main agent:** spawns opus subagent (high thinking) via `sessions_spawn`. Subagent reads `commands/mergepr.md`.
-10. **Opus subagent:** verifies state, checks GitHub identity, merges via `gh pr merge --squash`, then spawns a single cleanup sub-subagent (close superseded PRs, close related issues, clean worktree). Pings back merge SHA.
+9. **Main agent:** spawns gpt subagent (xhigh thinking) via `sessions_spawn`. Subagent reads `commands/mergepr.md`.
+10. **GPT subagent:** verifies state, checks GitHub identity, merges via `gh pr merge --squash`, then spawns a single cleanup sub-subagent (close superseded PRs, close related issues, clean worktree). Pings back merge SHA.
 11. **Main agent:** confirms to user with merge SHA
 
 ## ALWAYS USE SUBAGENT
@@ -112,10 +112,13 @@ Use different models by role:
 
 | Role | Alias | Model ID | TPS | Use for |
 |------|-------|----------|-----|---------|
-| Top-level orchestrator subagent | `opus` | anthropic/claude-opus-4-6 | n/a | Review judgment, synthesis, instruction following, orchestration |
-| Sub-subagent code worker | `gpt` | openai-codex/gpt-5.3-codex | 60 | Code analysis, fixes, GitHub searches, CI checks, post-merge cleanup, API calls |
+| Review orchestrator (parallel fanout) | `opus` | anthropic/claude-opus-4-6 | n/a | Review judgment, synthesis, parallel sub-subagent orchestration |
+| Serial workflows (prep, merge) | `gpt` | openai-codex/gpt-5.3-codex | 60 | Prep fixes, gates, merge, cleanup. Uses thinking:xhigh. |
+| Sub-subagent code worker | `gpt` | openai-codex/gpt-5.3-codex | 60 | Code analysis, CI checks, post-merge cleanup, API calls |
 
-Top-level subagents for `/reviewpr`, `/preparepr`, and `/mergepr` use `model:opus`. Sub-subagents spawned inside those commands use `model:gpt` (with `thinking:xhigh` where specified).
+- `/reviewpr` uses `model:opus` (orchestrates 2-3 parallel sub-subagents)
+- `/preparepr` uses `model:gpt thinking:xhigh` (fully serial, no sub-subagents)
+- `/mergepr` uses `model:gpt thinking:xhigh` (serial merge + one cleanup sub-subagent)
 
 If a model is not available, fall back to session default model.
 
@@ -130,13 +133,13 @@ Use opus for the top-level review orchestrator. Sub-subagents inside `reviewpr.m
 ## Prep Workflow (/preparepr)
 
 ```
-sessions_spawn task:"Prepare PR #<number> in openclaw repo. Read commands/preparepr.md and follow its instructions exactly." model:opus thinking:high runTimeoutSeconds:0 label:"pr-<number>-prep"
+sessions_spawn task:"Prepare PR #<number> in openclaw repo. Read commands/preparepr.md and follow its instructions exactly." model:gpt thinking:xhigh runTimeoutSeconds:0 label:"pr-<number>-prep"
 ```
 
 ## Merge Workflow (/mergepr)
 
 ```
-sessions_spawn task:"Merge PR #<number> in openclaw repo. Read commands/mergepr.md and follow its instructions exactly." model:opus thinking:high runTimeoutSeconds:0 label:"pr-<number>-merge"
+sessions_spawn task:"Merge PR #<number> in openclaw repo. Read commands/mergepr.md and follow its instructions exactly." model:gpt thinking:xhigh runTimeoutSeconds:0 label:"pr-<number>-merge"
 ```
 
 ## Parallelism Design
@@ -150,7 +153,7 @@ Each command file documents when and how to spawn sub-subagents, including which
 - **Subagent C (Test Coverage)** `model:gpt thinking:xhigh`: checks test coverage gaps, test quality (flags sleep/setTimeout/polling), docs, changelog
 - Then the parent (opus) combines all results into one structured review
 
-### /preparepr execution model
+### /preparepr execution model (gpt, xhigh thinking)
 Fully serial in a single parent subagent, no parallel scan fanout:
 - **Install + Scan Phase:** parent installs dependencies, runs lint and review-driven fix identification inline
 - **Fix Phase:** parent applies blockers/importants, handles local files, updates code/tests
@@ -159,8 +162,8 @@ Fully serial in a single parent subagent, no parallel scan fanout:
 
 Why this is serial now: prep scan fanout only saved a couple minutes but added orchestration complexity. Fewer moving parts means fewer announce chains to break, and fresh parallel context is better spent on review where readers are truly independent.
 
-### /mergepr parallelism
-Serial merge (parent, opus) with identity-aware commenting, then single cleanup sub-subagent:
+### /mergepr execution model (gpt, xhigh thinking)
+Serial merge (parent, gpt) with identity-aware commenting, then single cleanup sub-subagent:
 - **Serial Phase:** verify state, check GitHub identity, merge via gh pr merge --squash, post identity-aware comment
 - **Single Cleanup Sub-subagent** `model:gpt`: close superseded PRs (identity-aware), close related issues (identity-aware), clean worktree and branches. All done serially in one agent since it's ~5 API calls total.
 
