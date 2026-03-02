@@ -1,5 +1,14 @@
 /reviewpr
 
+## CRITICAL: NO POLLING EVER
+- After spawning sub-subagents, you MUST end your turn immediately. Just say what you spawned and stop.
+- Do NOT poll, loop, check status, call subagents list, sessions_list, or sessions_history.
+- Do NOT use sleep, wait, or any delay mechanism.
+- Results will be delivered to you automatically as user messages when children complete.
+- When all children have reported back, THEN continue with the next step.
+- This is non-negotiable. Polling wastes tokens and breaks the announce chain.
+
+
 Input
 - PR: <number|url>
   - If missing: ALWAYS ask. Never auto-detect from conversation.
@@ -244,17 +253,17 @@ Your job:
 
 2) Find related issues that this PR might fix:
    pr_title=$(gh pr view <PR> --json title --jq .title)
-   gh issue list --state open --limit 20 --json number,title --jq '.[] | \"\(.number)\t\(.title)\"' | rg -i '<keyword>' || true
+   gh issue list --state open --limit 500 --json number,title --jq '.[] | \"\(.number)\t\(.title)\"' | rg -i '<keyword>' || true
    gh pr view <PR> --json body --jq .body | rg -io '(fix(es)?|close[sd]?|resolve[sd]?)\s*#\d+' || true
 
 3) Find related/duplicate open PRs:
-   gh pr list --state open --limit 30 --json number,title --jq '.[] | \"\(.number)\t\(.title)\"' | rg -i '<keyword>' || true
+   gh pr list --state open --limit 500 --json number,title --jq '.[] | \"\(.number)\t\(.title)\"' | rg -i '<keyword>' || true
 
 4) Search more broadly for related items:
    title=$(gh pr view <PR> --json title --jq .title)
    q1=$(echo \"$title\" | sed -E 's/\([^)]*\)//g' | tr -s ' ' | cut -c1-80)
-   gh search issues --repo openclaw/openclaw --state open --limit 20 --json number,title --search \"$q1\" || true
-   gh search prs --repo openclaw/openclaw --state open --limit 20 --json number,title --search \"$q1\" || true
+   gh search issues --repo openclaw/openclaw --state open --limit 500 --json number,title --search \"$q1\" || true
+   gh search prs --repo openclaw/openclaw --state open --limit 500 --json number,title --search \"$q1\" || true
 
 5) Write your output to .local/review-b.md with sections:
    - CI_STATUS: pass/fail/pending for each check
@@ -349,7 +358,11 @@ Write your output to .local/review-c.md with sections:
 
 DO NOT POLL. DO NOT LOOP. DO NOT call subagents list or sessions_list.
 
+After spawning the 3 sub-subagents in Step 4, your response should be SHORT. Just confirm what you spawned and END YOUR TURN. Do not read files, do not run commands, do not plan ahead. STOP TALKING.
+
 Sub-subagents will auto-announce their results back to you as user messages when they complete. Just end your turn and wait. When all three have announced back, read their output files:
+
+When you receive all 3 child results as user messages, read the output files and continue. Your FINAL message after producing the review MUST contain the actual review content, not just 'got it' or 'already integrated'. The parent agent needs your review text in your final response to announce it upward.
 
 ```sh
 cd ~/Development/openclaw/.worktrees/pr-<PR>
